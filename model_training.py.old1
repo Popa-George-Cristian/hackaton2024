@@ -1,0 +1,81 @@
+import os
+from imutils import paths
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
+import torchvision  # <-- Missing import
+from torch.utils.data import DataLoader
+import dlib
+import pickle
+import cv2
+import numpy as np
+
+# Ensure CUDA is available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# Pre-trained ResNet model for face feature extraction
+class FeatureExtractor(nn.Module):
+    def __init__(self):
+        super(FeatureExtractor, self).__init__()
+        resnet = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1)
+        self.features = nn.Sequential(*list(resnet.children())[:-1])  # Remove the classifier layer
+
+    def forward(self, x):
+        return self.features(x)
+
+# Initialize the face detector (using dlib's HOG method)
+detector = dlib.get_frontal_face_detector()
+
+# Initialize the feature extractor model
+model = FeatureExtractor().to(device)
+model.eval()  # Set the model to evaluation mode
+
+# Define image transformations (resize, convert to tensor)
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+# Image processing loop
+print("[INFO] start processing faces...")
+imagePaths = list(paths.list_images("dataset"))
+knownEncodings = []
+knownNames = []
+
+for (i, imagePath) in enumerate(imagePaths):
+    print(f"[INFO] processing image {i + 1}/{len(imagePaths)}")
+    name = imagePath.split(os.path.sep)[-2]
+
+    # Read image and convert to RGB
+    image = cv2.imread(imagePath)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # Detect faces in the image
+    faces = detector(rgb)
+    
+    for face in faces:
+        # Crop the face from the image
+        x1, y1, x2, y2 = (face.left(), face.top(), face.right(), face.bottom())
+        face_image = rgb[y1:y2, x1:x2]
+        
+        # Transform image to tensor and move to GPU
+        input_tensor = transform(face_image).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            # Extract features from the face
+            features = model(input_tensor)
+            encoding = features.squeeze().cpu().numpy()
+
+        knownEncodings.append(encoding)
+        knownNames.append(name)
+
+# Save the encodings to a pickle file
+print("[INFO] serializing encodings...")
+data = {"encodings": knownEncodings, "names": knownNames}
+with open("encodings.pickle", "wb") as f:
+    f.write(pickle.dumps(data))
+
+print("[INFO] Training complete. Encodings saved to 'encodings.pickle'")

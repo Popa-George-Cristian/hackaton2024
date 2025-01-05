@@ -1,0 +1,103 @@
+import face_recognition
+import cv2
+import numpy as np
+import time
+import pickle
+from concurrent.futures import ThreadPoolExecutor
+
+class Camera:
+    def __init__(self):
+        print("[INFO] Loading encodings...")
+
+        with open("encodings.pickle", "rb") as f:
+            data = pickle.loads(f.read())
+        self.known_face_encodings = data["encodings"]
+        self.known_face_names = data["names"]
+
+        self.cam = cv2.VideoCapture(0)
+        self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Set lower resolution
+        self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        self.cv_scaler = 4  
+        self.face_locations = []
+        self.face_encodings = []
+        self.face_names = []
+        self.frame_count = 0
+        self.start_time = time.time()
+        self.fps = 0
+        self.status_code = 0
+        self.getName = ''
+        self.thread_pool = ThreadPoolExecutor(max_workers=2)
+
+    def process_frame(self, frame):
+        resized_frame = cv2.resize(frame, (0, 0), fx=(1 / self.cv_scaler), fy=(1 / self.cv_scaler))
+        rgb_resized_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+
+        self.face_locations = face_recognition.face_locations(rgb_resized_frame, model='hog')
+        self.face_encodings = face_recognition.face_encodings(rgb_resized_frame, self.face_locations)
+
+        self.face_names = []
+        for face_encoding in self.face_encodings:
+            matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding)
+            name = "Unknown"
+
+            face_distances = face_recognition.face_distance(self.known_face_encodings, face_encoding)
+            if len(face_distances) > 0:
+                best_match_index = np.argmin(face_distances)
+                if matches[best_match_index]:
+                    name = self.known_face_names[best_match_index]
+            self.face_names.append(name)
+
+        return frame
+
+    def update_status(self, status_code):
+        self.status_code = status_code
+
+    def draw_results(self, frame):
+        for (top, right, bottom, left), name in zip(self.face_locations, self.face_names):
+            top *= self.cv_scaler
+            right *= self.cv_scaler
+            bottom *= self.cv_scaler
+            left *= self.cv_scaler
+
+            box_color = (0, 255, 0) if self.status_code == 1 else (0, 0, 255) if self.status_code == 0 else (0, 255, 255)
+            text_color = (255, 255, 255)
+
+            cv2.rectangle(frame, (left, top), (right, bottom), box_color, 3)
+            cv2.rectangle(frame, (left - 3, top - 35), (right + 3, top), box_color, cv2.FILLED)
+            font = cv2.FONT_HERSHEY_DUPLEX
+            cv2.putText(frame, name, (left + 6, top - 6), font, 1.0, text_color, 1)
+
+            self.getName = name
+        return frame
+
+    def returnName(self):
+        return self.getName
+
+    def calculate_fps(self):
+        self.frame_count += 1
+        elapsed_time = time.time() - self.start_time
+        if elapsed_time > 1:
+            self.fps = self.frame_count / elapsed_time
+            self.frame_count = 0
+            self.start_time = time.time()
+        return self.fps
+
+    def start_recognition(self):
+        ret, frame = self.cam.read()
+        if not ret:
+            print("[ERROR] Unable to capture frame.")
+            return None
+        
+        future = self.thread_pool.submit(self.process_frame, frame)
+        processed_frame = future.result()
+        display_frame = self.draw_results(processed_frame)
+
+        current_fps = self.calculate_fps()
+        cv2.putText(display_frame, f"FPS: {current_fps:.1f}", (display_frame.shape[1] - 150, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        return display_frame
+
+    def release_cv(self):
+        self.cam.release()
+        cv2.destroyAllWindows()
